@@ -1,0 +1,53 @@
+clone files into current directory:  
+	git clone git@github.com:Ilyas097/FYP.git .
+
+current stutus (or changes) of the project
+	git status
+	
+update your PC from GitHub
+	git pull
+
+before update GitHub from your PC
+	git add .		(All)
+	git add main.py		(File)
+	git rm main.py
+
+commit	
+	git commit -m "xxxxxxxxxxxxx"
+
+update GitHub from your PC (Push to GitHub)
+	git push
+
+get difference
+	git diff
+
+
+
+
+
+branches and logs
+	git branch			(in your device)
+	git branch feature-login
+	git switch feature-login
+	git switch main			(switch branch)
+	git branch -r			(remote: in GitHub)
+	git remote -v
+	git log
+	git log --oneline		(short with no time)
+	
+	git switch -c dev --track origin/dev
+
+
+
+
+Files
+	git mv old_folder new_folder
+	git rm file.txt
+	
+	
+	
+	
+	
+update local rebo	
+	git fetch --prune origin
+
