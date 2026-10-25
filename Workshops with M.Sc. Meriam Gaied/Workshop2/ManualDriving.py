@@ -1,5 +1,7 @@
+
 import csv
 import logging
+import math
 import queue
 import threading
 from datetime import datetime
@@ -22,28 +24,30 @@ BRAKE_AXIS = 5
 REVERSE_BUTTON = 21
 HANDBRAKE_BUTTON = 23
 
-FIXED_DELTA_SECONDS = 1.0 / 120.0
+SIMULATION_HZ = 90
+FIXED_DELTA_SECONDS = 1.0 / SIMULATION_HZ
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
-IMAGE_CAPTURE_RATE_HZ = 10
+IMAGE_CAPTURE_RATE_HZ = 5
 IMAGE_QUEUE_SIZE = 20
-SAVE_CAMERA_IMAGES = True
+SAVE_CAMERA_IMAGES = False
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 IMAGE_DIRECTORY = Path(__file__).with_name("CameraImages") / f"run_{RUN_TIMESTAMP}"
 MOTION_CUEING_FILE = Path(__file__).with_name(f"motion_cueing_{RUN_TIMESTAMP}.csv")
 MOTION_CUEING_COLUMNS = (
-    "acceleration_x",
-    "acceleration_y",
-    "acceleration_z",
-    "angular_velocity_x",
-    "angular_velocity_y",
-    "angular_velocity_z",
+    "acceleration_forward_mps2",
+    "acceleration_right_mps2",
+    "acceleration_up_mps2",
+    "angular_velocity_roll_deg_s",
+    "angular_velocity_pitch_deg_s",
+    "angular_velocity_yaw_deg_s",
 )
 
 
 def update_spectator_view(spectator, vehicle_transform):
+    
     camera_location = vehicle_transform.transform(
-        carla.Location(x=0.1, y=-0.35, z=1.1)
+        carla.Location(x=0, y=-0.4, z=1.15)
     )
     spectator.set_transform(
         carla.Transform(camera_location, vehicle_transform.rotation)
@@ -70,7 +74,7 @@ class CameraRecorder:
         self.sensor = world.spawn_actor(
             blueprint,
             carla.Transform(
-                carla.Location(x=0.1, y=-0.35, z=1.1),
+                carla.Location(x=0, y=-0.4, z=1.15),
                 carla.Rotation(pitch=0, yaw=0),
             ),
             attach_to=vehicle,
@@ -187,7 +191,15 @@ try:
 
     handbrake = False
     last_log = time.monotonic()
+    next_tick = time.monotonic()
     while True:
+        next_tick += FIXED_DELTA_SECONDS
+        sleep_seconds = next_tick - time.monotonic()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+        else:
+            next_tick = time.monotonic()
+
         for event in pygame.event.get():
             if (
                 event.type == pygame.JOYBUTTONDOWN
@@ -217,25 +229,72 @@ try:
         world.tick()
         transform = vehicle.get_transform()
         update_spectator_view(spectator, transform)
-        acceleration = vehicle.get_acceleration()
-        angular_velocity = vehicle.get_angular_velocity()
+
+        # Get acceleration in world coordinates (m/s^2).
+        acceleration_world = vehicle.get_acceleration()
+
+        # Get angular velocity in world coordinates (degrees/s).
+        angular_velocity_world = vehicle.get_angular_velocity()
+
+        # Vehicle-relative forward, right, and up axes.
+        forward = transform.get_forward_vector()
+        right = transform.get_right_vector()
+        up = transform.get_up_vector()
+
+        # Convert acceleration to vehicle-relative coordinates.
+        acceleration = (
+            acceleration_world.x * forward.x
+            + acceleration_world.y * forward.y
+            + acceleration_world.z * forward.z,
+
+            acceleration_world.x * right.x
+            + acceleration_world.y * right.y
+            + acceleration_world.z * right.z,
+
+            acceleration_world.x * up.x
+            + acceleration_world.y * up.y
+            + acceleration_world.z * up.z,
+        )
+
+        # Convert angular velocity to vehicle-relative roll, pitch, yaw.
+        angular_velocity = (
+            angular_velocity_world.x * forward.x
+            + angular_velocity_world.y * forward.y
+            + angular_velocity_world.z * forward.z,
+
+            angular_velocity_world.x * right.x
+            + angular_velocity_world.y * right.y
+            + angular_velocity_world.z * right.z,
+
+            angular_velocity_world.x * up.x
+            + angular_velocity_world.y * up.y
+            + angular_velocity_world.z * up.z,
+        )
+
         motion_log.writerow(
             (
-                acceleration.x,
-                acceleration.y,
-                acceleration.z,
-                angular_velocity.x,
-                angular_velocity.y,
-                angular_velocity.z,
+                acceleration[0],
+                acceleration[1],
+                acceleration[2],
+                angular_velocity[0],
+                angular_velocity[1],
+                angular_velocity[2],
             )
         )
 
         now = time.monotonic()
         if now - last_log >= 1.0:
             velocity = vehicle.get_velocity()
+            speed_mps = math.sqrt(
+                velocity.x * velocity.x
+                + velocity.y * velocity.y
+                + velocity.z * velocity.z
+            )
             logger.info(
-                "Velocity=(%.2f, %.2f, %.2f) steer=%.2f throttle=%.2f brake=%.2f "
+                "Speed=%.2f m/s  Velocity=(%.2f, %.2f, %.2f) "
+                "steer=%.2f throttle=%.2f brake=%.2f "
                 "reverse=%s handbrake=%s",
+                speed_mps,
                 velocity.x,
                 velocity.y,
                 velocity.z,
