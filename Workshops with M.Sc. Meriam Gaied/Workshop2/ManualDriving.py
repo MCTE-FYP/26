@@ -26,14 +26,14 @@ HANDBRAKE_BUTTON = 23
 
 SIMULATION_HZ = 90
 FIXED_DELTA_SECONDS = 1.0 / SIMULATION_HZ
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 720
+SAVED_IMAGE_WIDTH = 640
+SAVED_IMAGE_HEIGHT = 360
 CAMERA_MAX_HEAD_PITCH_DEG = 1.5
 CAMERA_HEAD_RESPONSE_SECONDS = 0.22
 CAMERA_MAX_ACCELERATION_MPS2 = 4.0
 CAMERA_MAX_VERTICAL_SHIFT_PIXELS = 12
 IMAGE_CAPTURE_RATE_HZ = 5
-IMAGE_QUEUE_SIZE = 20
+IMAGE_QUEUE_SIZE = 5
 SAVE_CAMERA_IMAGES = True
 IMAGE_FRAME_INTERVAL = max(1, round(SIMULATION_HZ / IMAGE_CAPTURE_RATE_HZ))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -61,13 +61,16 @@ class CameraRecorder:
         self.head_pitch_degrees = 0.0
 
     def start(self, world, vehicle):
+        display_info = pygame.display.Info()
+        self.display_size = (display_info.current_w, display_info.current_h)
+        pygame.display.set_mode(self.display_size, pygame.FULLSCREEN)
+        pygame.display.set_caption("CARLA Vehicle Camera")
+
         blueprint = world.get_blueprint_library().find("sensor.camera.rgb")
-        blueprint.set_attribute("image_size_x", str(CAMERA_WIDTH))
-        blueprint.set_attribute("image_size_y", str(CAMERA_HEIGHT))
+        blueprint.set_attribute("image_size_x", str(self.display_size[0]))
+        blueprint.set_attribute("image_size_y", str(self.display_size[1]))
         blueprint.set_attribute("fov", "90")
         blueprint.set_attribute("sensor_tick", str(FIXED_DELTA_SECONDS))
-        pygame.display.set_mode((CAMERA_WIDTH, CAMERA_HEIGHT))
-        pygame.display.set_caption("CARLA Vehicle Camera")
         self.sensor = world.spawn_actor(
             blueprint,
             carla.Transform(
@@ -114,17 +117,31 @@ class CameraRecorder:
             self.head_pitch_degrees += (
                 target_pitch - self.head_pitch_degrees
             ) * response
+            display = pygame.display.get_surface()
+            max_vertical_shift = round(
+                display.get_height()
+                * CAMERA_MAX_VERTICAL_SHIFT_PIXELS
+                / self.display_size[1]
+            )
             vertical_shift = round(
                 self.head_pitch_degrees
                 / CAMERA_MAX_HEAD_PITCH_DEG
-                * CAMERA_MAX_VERTICAL_SHIFT_PIXELS
+                * max_vertical_shift
             )
             surface = pygame.image.frombuffer(
                 image.raw_data, (image.width, image.height), "BGRA"
             )
-            display = pygame.display.get_surface()
-            display.fill((0, 0, 0))
-            display.blit(surface, (0, vertical_shift))
+            if max_vertical_shift:
+                surface = pygame.transform.scale(
+                    surface,
+                    (
+                        self.display_size[0],
+                        self.display_size[1] + 2 * max_vertical_shift,
+                    ),
+                )
+                display.blit(surface, (0, vertical_shift - max_vertical_shift))
+            else:
+                display.blit(surface, (0, 0))
             pygame.display.flip()
 
     def _save_images(self):
@@ -133,8 +150,15 @@ class CameraRecorder:
             try:
                 if image is None:
                     return
-                image.save_to_disk(
-                    str(IMAGE_DIRECTORY / f"frame_{image.frame:08d}.png")
+                surface = pygame.image.frombuffer(
+                    image.raw_data, (image.width, image.height), "BGRA"
+                )
+                surface = pygame.transform.scale(
+                    surface, (SAVED_IMAGE_WIDTH, SAVED_IMAGE_HEIGHT)
+                )
+                pygame.image.save(
+                    surface,
+                    str(IMAGE_DIRECTORY / f"frame_{image.frame:08d}.png"),
                 )
             except Exception as exc:
                 self.errors.append(exc)
