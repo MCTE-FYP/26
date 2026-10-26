@@ -59,12 +59,15 @@ class CameraRecorder:
         self.latest_image = None
         self.image_lock = threading.Lock()
         self.head_pitch_degrees = 0.0
+        self.last_render_time = None
+        self.display_fps = 0.0
 
     def start(self, world, vehicle):
         display_info = pygame.display.Info()
         self.display_size = (display_info.current_w, display_info.current_h)
         pygame.display.set_mode(self.display_size, pygame.FULLSCREEN)
         pygame.display.set_caption("CARLA Vehicle Camera")
+        self.fps_font = pygame.font.Font(None, 32)
 
         blueprint = world.get_blueprint_library().find("sensor.camera.rgb")
         blueprint.set_attribute("image_size_x", str(self.display_size[0]))
@@ -106,6 +109,18 @@ class CameraRecorder:
             image = self.latest_image
             self.latest_image = None
         if image is not None:
+            now = time.perf_counter()
+            if self.last_render_time is not None:
+                frame_seconds = now - self.last_render_time
+                if frame_seconds > 0:
+                    measured_fps = 1.0 / frame_seconds
+                    self.display_fps = (
+                        measured_fps
+                        if self.display_fps == 0.0
+                        else 0.9 * self.display_fps + 0.1 * measured_fps
+                    )
+            self.last_render_time = now
+
             acceleration_ratio = max(
                 -1.0,
                 min(1.0, forward_acceleration / CAMERA_MAX_ACCELERATION_MPS2),
@@ -142,6 +157,16 @@ class CameraRecorder:
                 display.blit(surface, (0, vertical_shift - max_vertical_shift))
             else:
                 display.blit(surface, (0, 0))
+            fps_label = self.fps_font.render(
+                f"FPS: {self.display_fps:.1f}", True, (255, 255, 255)
+            )
+            fps_background = pygame.Surface(
+                (fps_label.get_width() + 16, fps_label.get_height() + 12),
+                pygame.SRCALPHA,
+            )
+            fps_background.fill((0, 0, 0, 160))
+            display.blit(fps_background, (12, 12))
+            display.blit(fps_label, (20, 18))
             pygame.display.flip()
 
     def _save_images(self):
