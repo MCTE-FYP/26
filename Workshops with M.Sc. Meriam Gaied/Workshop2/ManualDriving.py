@@ -28,9 +28,14 @@ SIMULATION_HZ = 90
 FIXED_DELTA_SECONDS = 1.0 / SIMULATION_HZ
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
+CAMERA_MAX_HEAD_PITCH_DEG = 1.5
+CAMERA_HEAD_RESPONSE_SECONDS = 0.22
+CAMERA_MAX_ACCELERATION_MPS2 = 4.0
+CAMERA_MAX_VERTICAL_SHIFT_PIXELS = 12
 IMAGE_CAPTURE_RATE_HZ = 5
 IMAGE_QUEUE_SIZE = 20
-SAVE_CAMERA_IMAGES = False
+SAVE_CAMERA_IMAGES = True
+IMAGE_FRAME_INTERVAL = max(1, round(SIMULATION_HZ / IMAGE_CAPTURE_RATE_HZ))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 IMAGE_DIRECTORY = Path(__file__).with_name("CameraImages") / f"run_{RUN_TIMESTAMP}"
 MOTION_CUEING_FILE = Path(__file__).with_name(f"motion_cueing_{RUN_TIMESTAMP}.csv")
@@ -44,16 +49,6 @@ MOTION_CUEING_COLUMNS = (
 )
 
 
-def update_spectator_view(spectator, vehicle_transform):
-    
-    camera_location = vehicle_transform.transform(
-        carla.Location(x=0, y=-0.4, z=1.15)
-    )
-    spectator.set_transform(
-        carla.Transform(camera_location, vehicle_transform.rotation)
-    )
-
-
 class CameraRecorder:
     def __init__(self):
         self.sensor = None
@@ -61,16 +56,18 @@ class CameraRecorder:
         self.images = queue.Queue(maxsize=IMAGE_QUEUE_SIZE)
         self.errors = []
         self.dropped = 0
+        self.latest_image = None
+        self.image_lock = threading.Lock()
+        self.head_pitch_degrees = 0.0
 
     def start(self, world, vehicle):
-        if not SAVE_CAMERA_IMAGES:
-            return
-
         blueprint = world.get_blueprint_library().find("sensor.camera.rgb")
         blueprint.set_attribute("image_size_x", str(CAMERA_WIDTH))
         blueprint.set_attribute("image_size_y", str(CAMERA_HEIGHT))
         blueprint.set_attribute("fov", "90")
-        blueprint.set_attribute("sensor_tick", str(1.0 / IMAGE_CAPTURE_RATE_HZ))
+        blueprint.set_attribute("sensor_tick", str(FIXED_DELTA_SECONDS))
+        pygame.display.set_mode((CAMERA_WIDTH, CAMERA_HEIGHT))
+        pygame.display.set_caption("CARLA Vehicle Camera")
         self.sensor = world.spawn_actor(
             blueprint,
             carla.Transform(
@@ -79,21 +76,56 @@ class CameraRecorder:
             ),
             attach_to=vehicle,
         )
-        IMAGE_DIRECTORY.mkdir(parents=True, exist_ok=True)
-        self.writer = threading.Thread(target=self._save_images, daemon=True)
-        self.writer.start()
+        if SAVE_CAMERA_IMAGES:
+            IMAGE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            self.writer = threading.Thread(target=self._save_images, daemon=True)
+            self.writer.start()
         self.sensor.listen(self._queue_image)
-        logger.info("Saving camera images at up to %s Hz to %s",
-                    IMAGE_CAPTURE_RATE_HZ, IMAGE_DIRECTORY)
+        logger.info("Using camera sensor attached to vehicle")
+        if SAVE_CAMERA_IMAGES:
+            logger.info("Saving camera images at up to %s Hz to %s",
+                        IMAGE_CAPTURE_RATE_HZ, IMAGE_DIRECTORY)
 
     def _queue_image(self, image):
-        try:
-            self.images.put_nowait(image)
-        except queue.Full:
-            self.dropped += 1
-            if self.dropped == 1 or self.dropped % 100 == 0:
-                logger.warning("Dropped %s camera images: save queue is full",
-                               self.dropped)
+        with self.image_lock:
+            self.latest_image = image
+        if SAVE_CAMERA_IMAGES and image.frame % IMAGE_FRAME_INTERVAL == 0:
+            try:
+                self.images.put_nowait(image)
+            except queue.Full:
+                self.dropped += 1
+                if self.dropped == 1 or self.dropped % 100 == 0:
+                    logger.warning("Dropped %s camera images: save queue is full",
+                                   self.dropped)
+
+    def render_latest(self, forward_acceleration, delta_seconds):
+        with self.image_lock:
+            image = self.latest_image
+            self.latest_image = None
+        if image is not None:
+            acceleration_ratio = max(
+                -1.0,
+                min(1.0, forward_acceleration / CAMERA_MAX_ACCELERATION_MPS2),
+            )
+            target_pitch = acceleration_ratio * CAMERA_MAX_HEAD_PITCH_DEG
+            response = 1.0 - math.exp(
+                -delta_seconds / CAMERA_HEAD_RESPONSE_SECONDS
+            )
+            self.head_pitch_degrees += (
+                target_pitch - self.head_pitch_degrees
+            ) * response
+            vertical_shift = round(
+                self.head_pitch_degrees
+                / CAMERA_MAX_HEAD_PITCH_DEG
+                * CAMERA_MAX_VERTICAL_SHIFT_PIXELS
+            )
+            surface = pygame.image.frombuffer(
+                image.raw_data, (image.width, image.height), "BGRA"
+            )
+            display = pygame.display.get_surface()
+            display.fill((0, 0, 0))
+            display.blit(surface, (0, vertical_shift))
+            pygame.display.flip()
 
     def _save_images(self):
         while True:
@@ -177,10 +209,6 @@ try:
     if vehicle is None:
         raise RuntimeError("Could not find a free vehicle spawn point")
 
-    spectator = world.get_spectator()
-    update_spectator_view(spectator, vehicle.get_transform())
-    logger.info("Using CARLA spectator view; no Pygame display window")
-
     camera_recorder = CameraRecorder()
     camera_recorder.start(world, vehicle)
 
@@ -190,9 +218,10 @@ try:
     logger.info("Writing motion cueing data to %s", MOTION_CUEING_FILE)
 
     handbrake = False
+    running = True
     last_log = time.monotonic()
     next_tick = time.monotonic()
-    while True:
+    while running:
         next_tick += FIXED_DELTA_SECONDS
         sleep_seconds = next_tick - time.monotonic()
         if sleep_seconds > 0:
@@ -201,13 +230,17 @@ try:
             next_tick = time.monotonic()
 
         for event in pygame.event.get():
-            if (
+            if event.type == pygame.QUIT:
+                running = False
+            elif (
                 event.type == pygame.JOYBUTTONDOWN
                 and event.instance_id == joystick.get_instance_id()
                 and event.button == HANDBRAKE_BUTTON
             ):
                 handbrake = not handbrake
                 logger.info("Handbrake: %s", handbrake)
+        if not running:
+            break
 
         steering = max(-1.0, min(1.0, joystick.get_axis(STEERING_AXIS)))
         throttle = max(0.0, min(1.0, joystick.get_axis(THROTTLE_AXIS)))
@@ -226,10 +259,13 @@ try:
             )
         )
 
-        world.tick()
-        transform = vehicle.get_transform()
-        update_spectator_view(spectator, transform)
-
+        frame = world.tick()
+        snapshot = world.get_snapshot()
+        if snapshot.frame != frame:
+            raise RuntimeError(
+                f"World snapshot frame {snapshot.frame} does not match tick frame {frame}"
+            )
+        transform = snapshot.find(vehicle.id).get_transform()
         # Get acceleration in world coordinates (m/s^2).
         acceleration_world = vehicle.get_acceleration()
 
@@ -255,6 +291,8 @@ try:
             + acceleration_world.y * up.y
             + acceleration_world.z * up.z,
         )
+
+        camera_recorder.render_latest(acceleration[0], FIXED_DELTA_SECONDS)
 
         # Convert angular velocity to vehicle-relative roll, pitch, yaw.
         angular_velocity = (
