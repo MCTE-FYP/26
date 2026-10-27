@@ -1,4 +1,3 @@
-
 import csv
 import logging
 import math
@@ -35,6 +34,7 @@ CAMERA_MAX_VERTICAL_SHIFT_PIXELS = 12
 IMAGE_CAPTURE_RATE_HZ = 5
 IMAGE_QUEUE_SIZE = 5
 SAVE_CAMERA_IMAGES = True
+
 IMAGE_FRAME_INTERVAL = max(1, round(SIMULATION_HZ / IMAGE_CAPTURE_RATE_HZ))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 IMAGE_DIRECTORY = Path(__file__).with_name("CameraImages") / f"run_{RUN_TIMESTAMP}"
@@ -47,6 +47,10 @@ MOTION_CUEING_COLUMNS = (
     "angular_velocity_pitch_deg_s",
     "angular_velocity_yaw_deg_s",
 )
+
+
+def normalize_pedal_axis(axis_value):
+    return max(0.0, min(1.0, (axis_value + 1.0) / 2.0))
 
 
 class CameraRecorder:
@@ -104,7 +108,10 @@ class CameraRecorder:
                     logger.warning("Dropped %s camera images: save queue is full",
                                    self.dropped)
 
-    def render_latest(self, forward_acceleration, delta_seconds):
+    def render_latest(
+        self, forward_acceleration, delta_seconds, steering, throttle, brake,
+        handbrake, reverse,
+    ):
         with self.image_lock:
             image = self.latest_image
             self.latest_image = None
@@ -157,16 +164,49 @@ class CameraRecorder:
                 display.blit(surface, (0, vertical_shift - max_vertical_shift))
             else:
                 display.blit(surface, (0, 0))
-            fps_label = self.fps_font.render(
-                f"FPS: {self.display_fps:.1f}", True, (255, 255, 255)
-            )
-            fps_background = pygame.Surface(
-                (fps_label.get_width() + 16, fps_label.get_height() + 12),
+            status_labels = [
+                self.fps_font.render(
+                    f"FPS: {self.display_fps:.1f}", True, (255, 255, 255)
+                ),
+                self.fps_font.render(
+                    f"Throttle: {throttle * 100:.0f}%", True, (255, 255, 255)
+                ),
+                self.fps_font.render(
+                    f"Brake: {brake * 100:.0f}%", True, (255, 255, 255)
+                ),
+                self.fps_font.render(
+                    f"Steering: {steering * 100:+.0f}%", True, (255, 255, 255)
+                ),
+                self.fps_font.render(
+                    f"Handbrake: {'ON' if handbrake else 'OFF'}",
+                    True,
+                    (255, 255, 255),
+                ),
+                self.fps_font.render(
+                    f"Gear: {'Reverse' if reverse else 'Forward'}",
+                    True,
+                    (255, 255, 255),
+                ),
+            ]
+            status_width = max(label.get_width() for label in status_labels)
+            status_height = sum(label.get_height() for label in status_labels)
+            status_gap = 4
+            status_padding = 8
+            status_background = pygame.Surface(
+                (
+                    status_width + 2 * status_padding,
+                    status_height
+                    + 2 * status_padding
+                    + status_gap * (len(status_labels) - 1),
+                ),
                 pygame.SRCALPHA,
             )
-            fps_background.fill((0, 0, 0, 160))
-            display.blit(fps_background, (12, 12))
-            display.blit(fps_label, (20, 18))
+            status_background.fill((0, 0, 0, 160))
+            display.blit(status_background, (12, 12))
+            label_y = 12 + status_padding
+            for label in status_labels:
+                display.blit(label, (12 + status_padding, label_y))
+                label_y += label.get_height() + status_gap
             pygame.display.flip()
 
     def _save_images(self):
@@ -175,16 +215,17 @@ class CameraRecorder:
             try:
                 if image is None:
                     return
-                surface = pygame.image.frombuffer(
-                    image.raw_data, (image.width, image.height), "BGRA"
-                )
-                surface = pygame.transform.scale(
-                    surface, (SAVED_IMAGE_WIDTH, SAVED_IMAGE_HEIGHT)
-                )
-                pygame.image.save(
-                    surface,
-                    str(IMAGE_DIRECTORY / f"frame_{image.frame:08d}.png"),
-                )
+                if SAVE_CAMERA_IMAGES:
+                    surface = pygame.image.frombuffer(
+                        image.raw_data, (image.width, image.height), "BGRA"
+                    )
+                    surface = pygame.transform.scale(
+                        surface, (SAVED_IMAGE_WIDTH, SAVED_IMAGE_HEIGHT)
+                    )
+                    pygame.image.save(
+                        surface,
+                        str(IMAGE_DIRECTORY / f"frame_{image.frame:08d}.png"),
+                    )
             except Exception as exc:
                 self.errors.append(exc)
                 logger.exception("Failed to save camera frame %s", image.frame)
@@ -292,8 +333,8 @@ try:
             break
 
         steering = max(-1.0, min(1.0, joystick.get_axis(STEERING_AXIS)))
-        throttle = max(0.0, min(1.0, joystick.get_axis(THROTTLE_AXIS)))
-        brake = max(0.0, min(1.0, joystick.get_axis(BRAKE_AXIS)))
+        throttle = normalize_pedal_axis(joystick.get_axis(THROTTLE_AXIS))
+        brake = normalize_pedal_axis(joystick.get_axis(BRAKE_AXIS))
         reverse = bool(joystick.get_button(REVERSE_BUTTON))
 
         camera_recorder.check()
@@ -341,7 +382,10 @@ try:
             + acceleration_world.z * up.z,
         )
 
-        camera_recorder.render_latest(acceleration[0], FIXED_DELTA_SECONDS)
+        camera_recorder.render_latest(
+            acceleration[0], FIXED_DELTA_SECONDS, steering, throttle, brake,
+            handbrake, reverse,
+        )
 
         # Convert angular velocity to vehicle-relative roll, pitch, yaw.
         angular_velocity = (
